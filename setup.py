@@ -50,6 +50,12 @@ with open('requirements/isaac_requirements.txt', 'r') as f:
 with open('requirements/internvla_n1.txt', 'r') as f:
     n1_requires = f.read().splitlines()
 
+ascend_n1_requires = []
+ascend_req_path = 'requirements/internvla_n1_ascend310p.txt'
+if os.path.exists(ascend_req_path):
+    with open(ascend_req_path, 'r') as f:
+        ascend_n1_requires = f.read().splitlines()
+
 setuptools.setup(
     name='internnav',
     version='0.2.0',
@@ -82,6 +88,7 @@ setuptools.setup(
         ],
         # models
         "internvla_n1": n1_requires,
+        "internvla_n1_ascend310p": ascend_n1_requires,
         "baseline": model_requires,
         "model": model_requires,
     },

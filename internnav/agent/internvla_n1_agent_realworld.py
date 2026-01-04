@@ -16,6 +16,7 @@ from collections import OrderedDict
 
 from PIL import Image
 from transformers import AutoProcessor
+from transformers.utils import is_flash_attn_2_available
 
 from internnav.model.basemodel.internvla_n1.internvla_n1 import InternVLAN1ForCausalLM
 from internnav.model.utils.vln_utils import S2Output, split_and_clean, traj_to_actions
@@ -26,14 +27,81 @@ DEFAULT_IMAGE_TOKEN = "<image>"
 class InternVLAN1AsyncAgent:
     def __init__(self, args):
         self.device = torch.device(args.device)
+
+        # Ascend NPU (torch_npu) registers the `npu` device type.
+        # Importing torch_npu is often required to make `torch.device('npu:0')` work reliably.
+        if self.device.type == "npu":
+            try:
+                import torch_npu  # noqa: F401
+            except Exception as exc:
+                raise RuntimeError(
+                    "Device is set to NPU, but importing torch_npu failed. "
+                    "Please ensure torch_npu is installed in the current environment."
+                ) from exc
+
+            if hasattr(torch, "npu"):
+                try:
+                    torch.npu.set_device(self.device)
+                except Exception:
+                    # Some torch_npu versions accept only an int device index.
+                    try:
+                        torch.npu.set_device(self.device.index or 0)
+                    except Exception:
+                        pass
+
+        def _resolve_torch_dtype(value):
+            if value is None:
+                return None
+            if isinstance(value, torch.dtype):
+                return value
+            if isinstance(value, str):
+                mapping = {
+                    "fp16": torch.float16,
+                    "float16": torch.float16,
+                    "half": torch.float16,
+                    "bf16": torch.bfloat16,
+                    "bfloat16": torch.bfloat16,
+                    "fp32": torch.float32,
+                    "float32": torch.float32,
+                }
+                key = value.strip().lower()
+                if key in mapping:
+                    return mapping[key]
+            raise ValueError(f"Unsupported torch_dtype: {value!r}")
+
+        requested_attn_impl = getattr(args, "attn_implementation", None)
+        if requested_attn_impl is not None:
+            attn_implementation = requested_attn_impl
+        else:
+            if self.device.type == "cuda" and is_flash_attn_2_available():
+                attn_implementation = "flash_attention_2"
+            else:
+                # NPU + most CPU setups should use eager attention.
+                attn_implementation = "eager"
+
+        requested_dtype = _resolve_torch_dtype(getattr(args, "torch_dtype", None))
+        if requested_dtype is not None:
+            torch_dtype = requested_dtype
+        else:
+            # BF16 is typical on CUDA; Ascend 310P commonly uses FP16 for best compatibility.
+            if self.device.type == "cuda":
+                torch_dtype = torch.bfloat16
+            elif self.device.type == "npu":
+                torch_dtype = torch.float16
+            else:
+                torch_dtype = torch.float32
         self.save_dir = "test_data/" + datetime.now().strftime("%Y%m%d_%H%M%S")
         print(f"args.model_path{args.model_path}")
-        self.model = InternVLAN1ForCausalLM.from_pretrained(
-            args.model_path,
-            torch_dtype=torch.bfloat16,
-            attn_implementation="flash_attention_2",
-            device_map={"": self.device},
-        )
+
+        load_kwargs = {
+            "torch_dtype": torch_dtype,
+            "attn_implementation": attn_implementation,
+        }
+        # HuggingFace `device_map` is primarily implemented for CUDA/CPU. Avoid it on NPU.
+        if self.device.type == "cuda":
+            load_kwargs["device_map"] = {"": self.device}
+
+        self.model = InternVLAN1ForCausalLM.from_pretrained(args.model_path, **load_kwargs)
         self.model.eval()
         self.model.to(self.device)
 
