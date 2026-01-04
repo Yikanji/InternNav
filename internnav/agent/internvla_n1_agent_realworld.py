@@ -103,7 +103,8 @@ class InternVLAN1AsyncAgent:
 
         self.model = InternVLAN1ForCausalLM.from_pretrained(args.model_path, **load_kwargs)
         self.model.eval()
-        self.model.to(self.device)
+        # Ensure all parameters/buffers are on the correct device AND dtype.
+        self.model.to(device=self.device, dtype=torch_dtype)
 
         self.processor = AutoProcessor.from_pretrained(args.model_path)
         self.processor.tokenizer.padding_side = 'left'
@@ -283,7 +284,14 @@ class InternVLAN1AsyncAgent:
 
         text = self.processor.apply_chat_template(self.conversation_history, tokenize=False, add_generation_prompt=True)
 
-        inputs = self.processor(text=[text], images=self.input_images, return_tensors="pt").to(self.device)
+        inputs = self.processor(text=[text], images=self.input_images, return_tensors="pt")
+        # Move to device
+        inputs = inputs.to(self.device)
+        # Align floating-point inputs to the model dtype (important for NPU kernels).
+        model_dtype = next(self.model.parameters()).dtype
+        for key, value in list(inputs.items()):
+            if isinstance(value, torch.Tensor) and torch.is_floating_point(value):
+                inputs[key] = value.to(dtype=model_dtype)
         t0 = time.time()
         with torch.no_grad():
             outputs = self.model.generate(
